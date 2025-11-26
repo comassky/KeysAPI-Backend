@@ -8,8 +8,8 @@ BALANCE_API_BASE_URL=${BALANCE_API_BASE_URL:-"https://blockchain.info/balance?ac
 TOR_PROXY=${TOR_PROXY:-"socks5h://tor:9050"}
 SUCCESS_LOG_FILE=${SUCCESS_LOG_FILE:-"/app/output.txt"}
 
-# Variables pour limiter la taille du lot BATCH pour éviter l'erreur 414 Request-URI Too Large.
-MAX_BATCH_SIZE=450
+# 💡 MAX_BATCH_SIZE est lu depuis l'environnement (ex: Docker Compose). Défaut à 450.
+MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-450}
 
 # Variables d'environnement pour Telegram (DOIVENT être définies dans docker-compose)
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-"VOTRE_TOKEN_DE_BOT_PAR_DEFAUT"} 
@@ -67,7 +67,6 @@ while true; do
     fi
     
     # 2. Extraction des données d'adresse (WIF et BTCOUT) avec limitation de taille BATCH
-    # Extraction et formatage: WIF<espace>BTCOUT sur chaque ligne
     ADDRESS_DATA=$(echo "$RESPONSE" | jq -r '.bitcoin[] | "\(.wif) \(.btcout)" // empty' | head -n "$MAX_BATCH_SIZE")
 
     if [ -z "$ADDRESS_DATA" ]; then
@@ -76,8 +75,7 @@ while true; do
         continue
     fi
     
-    # 3. Construction de la chaîne d'adresses pour l'appel en batch (OPTIMISÉ)
-    # Extrait toutes les adresses de ADDRESS_DATA (2ème colonne) et les joint par '|'
+    # 3. Construction de la chaîne d'adresses pour l'appel en batch
     ADDRESS_LIST=$(echo "$ADDRESS_DATA" | awk '{print $2}' | paste -s -d '|' -)
 
     # 4. Appel de l'API de solde en mode batch
@@ -104,10 +102,9 @@ while true; do
         continue
     fi
 
-    # 6. Traitement des résultats (OPTIMISÉ)
+    # 6. Traitement des résultats
     
     while IFS= read -r LINE; do
-        # Utilisation de Bash Read pour séparer le WIF et le BTCOUT de la ligne actuelle
         read -r WIF BTCOUT <<< "$LINE"
 
         # Extraction des données de solde spécifiques (Sécurisé par // 0)
@@ -132,15 +129,15 @@ while true; do
             COLOR_CODE="\e[33m" # Jaune
             STATUS_SYMBOL="🟡"
         
-        # Sinon, reste en ROUGE (Inactif/Jamais utilisé)
+        # Sinon, reste en ROUGE
         fi
         
-        # Convertir FINAL_BALANCE en BTC (une seule fois pour l'affichage)
+        # Calcul et message de statut
         if [ "$FINAL_BALANCE" -gt 0 ]; then
             BALANCE_BTC=$(echo "scale=8; $FINAL_BALANCE / 100000000" | bc 2>/dev/null)
             STATUS_MESSAGE="${BALANCE_BTC} BTC (${N_TX} tx) $([ "$LOG_SUCCESS" = true ] && echo "! LOGGED")"
         else
-            BALANCE_BTC="0.00000000" # Pour le logging futur
+            BALANCE_BTC="0.00000000"
             STATUS_MESSAGE="${BALANCE_BTC} BTC (${N_TX} tx)"
         fi
 
@@ -175,5 +172,6 @@ while true; do
 
     # Incrémentation de l'index et pause
     INDEX=$((INDEX + 1))
-    sleep 5 
+    # 💡 DÉLAI AJUSTÉ : 2 secondes entre les appels BATCH.
+    sleep 2 
 done
