@@ -9,8 +9,8 @@ TOR_PROXY=${TOR_PROXY:-"socks5h://tor:9050"}
 SUCCESS_LOG_FILE=${SUCCESS_LOG_FILE:-"/app/output.txt"}
 
 # Variables pour limiter la taille du lot BATCH pour éviter l'erreur 414 Request-URI Too Large.
-# 💡 Limite fixée à 1000 adresses. Ajustez si l'erreur 414 persiste (ex: 750).
-MAX_BATCH_SIZE=400
+# Limite fixée à 450 adresses, basée sur les tests utilisateur.
+MAX_BATCH_SIZE=450
 
 # Variables d'environnement pour Telegram (DOIVENT être définies dans docker-compose)
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-"VOTRE_TOKEN_DE_BOT_PAR_DEFAUT"} 
@@ -133,47 +133,63 @@ while true; do
         FINAL_BALANCE=$(echo "$BALANCE_RESPONSE" | jq -r ".\"$BTCOUT\".final_balance // empty")
         N_TX=$(echo "$BALANCE_RESPONSE" | jq -r ".\"$BTCOUT\".n_tx // empty") 
         
-        # Affiche la ligne de test complète (WIF et Adresse)
-        printf "[%s] WIF: %-52s | Adresse: %-34s | Solde: " "$INDEX" "$WIF" "$BTCOUT"
+        # --- DÉBUT DE LA LOGIQUE COULEUR ET STATUT ---
+        COLOR_CODE="\e[31m"       # Couleur par défaut (Rouge)
+        STATUS_MESSAGE="❌ 0.00000000 BTC (0 tx) | Jamais utilisé"
+        LOG_SUCCESS=false
 
         if [ -n "$FINAL_BALANCE" ] && [ "$FINAL_BALANCE" != "null" ]; then
+            
+            # Conversion en BTC pour les tests de solde
             BALANCE_BTC=$(echo "scale=8; $FINAL_BALANCE / 100000000" | bc 2>/dev/null)
             
             # Vérifie si le solde est strictement supérieur à 0
             if (( $(echo "$BALANCE_BTC > 0" | bc -l) )); then
                 
-                EXPLORER_LINK="https://www.blockchain.com/fr/explorer/addresses/btc/${BTCOUT}"
+                # 🏆 CAS 1 : SOLDE TROUVÉ (Couleur VERTE)
+                COLOR_CODE="\e[32m" # Vert
+                STATUS_MESSAGE="🎉 ${BALANCE_BTC} BTC (${N_TX} tx) ! LOGGED"
+                LOG_SUCCESS=true
                 
-                # --- Préparation et Envoi de la notification Telegram (Succès) ---
-                TELEGRAM_MESSAGE="🔑 *SUCCÈS BTC TROUVÉ* \\(Index: ${INDEX}\\)\n"
-                TELEGRAM_MESSAGE+="*WIF \\(Privé\\):* \`${WIF}\`\n"
-                TELEGRAM_MESSAGE+="*Adresse:* \`${BTCOUT}\`\n"
-                TELEGRAM_MESSAGE+="*Solde:* ${BALANCE_BTC} BTC \n"
-                TELEGRAM_MESSAGE+="*Transactions:* ${N_TX} \n"
-                TELEGRAM_MESSAGE+="[Vérifier sur Blockchain](${EXPLORER_LINK})"
+            elif [ "$N_TX" -gt 0 ]; then
                 
-                send_telegram_notification "$TELEGRAM_MESSAGE"
-                # --------------------------------------------------------
-
-                # --- AFFICHAGE CONSOLE (Succès) ---
-                echo -e "\e[32m🎉 ${BALANCE_BTC} BTC (${N_TX} tx) ! LOGGED\e[0m"
-
-                # --- LOGGING DANS LE FICHIER (tee -a) ---
-                echo "--------------------------------------------------------" | tee -a "$SUCCESS_LOG_FILE"
-                echo "Date: $(date)" | tee -a "$SUCCESS_LOG_FILE"
-                echo "Index Source: ${INDEX}" | tee -a "$SUCCESS_LOG_FILE"
-                echo "WIF (PRIVATE KEY): ${WIF}" | tee -a "$SUCCESS_LOG_FILE"
-                echo "Lien Blockchain: ${EXPLORER_LINK}" | tee -a "$SUCCESS_LOG_FILE" 
-                printf "Adresse: %s | Transactions: %s | Solde (Satoshis): %s | Solde (BTC): %s\n" \
-                       "$BTCOUT" "$N_TX" "$FINAL_BALANCE" "$BALANCE_BTC" | tee -a "$SUCCESS_LOG_FILE"
+                # ⚠️ CAS 2 : TRANSACTIONS MAIS SOLDE NUL (Couleur JAUNE)
+                COLOR_CODE="\e[33m" # Jaune
+                STATUS_MESSAGE="🟡 0.00000000 BTC (${N_TX} tx) | Transactions antérieures"
                 
-            else
-                # Solde est 0 : Termine la ligne avec le résultat vide
-                echo "0.00000000 BTC (${N_TX} tx)"
+            # Si le solde est 0 et N_TX est 0, il reste en ROUGE (couleur par défaut)
             fi
-        else
-            # Erreur : Termine la ligne avec un message d'erreur
-            echo "⚠️ Non trouvé/Invalide"
+        fi
+        # --- FIN DE LA LOGIQUE COULEUR ET STATUT ---
+        
+        # 💡 FORMATAGE FINAL : Applique la couleur à toute la ligne (WIF, Adresse et Solde)
+        printf "${COLOR_CODE}WIF: %-52s | Adresse: %-34s | Solde: %s\e[0m\n" "$WIF" "$BTCOUT" "$STATUS_MESSAGE"
+
+        # Traitement du succès (uniquement si BTC > 0)
+        if [ "$LOG_SUCCESS" = true ]; then
+            
+            EXPLORER_LINK="https://www.blockchain.com/fr/explorer/addresses/btc/${BTCOUT}"
+
+            # --- Préparation et Envoi de la notification Telegram (Succès) ---
+            TELEGRAM_MESSAGE="🔑 *SUCCÈS BTC TROUVÉ* \\(Index: ${INDEX}\\)\n"
+            TELEGRAM_MESSAGE+="*WIF \\(Privé\\):* \`${WIF}\`\n"
+            TELEGRAM_MESSAGE+="*Adresse:* \`${BTCOUT}\`\n"
+            TELEGRAM_MESSAGE+="*Solde:* ${BALANCE_BTC} BTC \n"
+            TELEGRAM_MESSAGE+="*Transactions:* ${N_TX} \n"
+            TELEGRAM_MESSAGE+="[Vérifier sur Blockchain](${EXPLORER_LINK})"
+            
+            send_telegram_notification "$TELEGRAM_MESSAGE"
+            # --------------------------------------------------------
+
+            # --- LOGGING DANS LE FICHIER (tee -a) ---
+            echo "--------------------------------------------------------" | tee -a "$SUCCESS_LOG_FILE"
+            echo "Date: $(date)" | tee -a "$SUCCESS_LOG_FILE"
+            echo "Index Source: ${INDEX}" | tee -a "$SUCCESS_LOG_FILE"
+            echo "WIF (PRIVATE KEY): ${WIF}" | tee -a "$SUCCESS_LOG_FILE"
+            echo "Lien Blockchain: ${EXPLORER_LINK}" | tee -a "$SUCCESS_LOG_FILE" 
+            printf "Adresse: %s | Transactions: %s | Solde (Satoshis): %s | Solde (BTC): %s\n" \
+                   "$BTCOUT" "$N_TX" "$FINAL_BALANCE" "$BALANCE_BTC" | tee -a "$SUCCESS_LOG_FILE"
+        
         fi
         
     done <<< "$ADDRESS_DATA"
@@ -182,5 +198,5 @@ while true; do
     # Incrémentation de l'index et pause
     INDEX=$((INDEX + 1))
     # DÉLAI AJUSTÉ : 5 secondes entre les appels BATCH normaux.
-    sleep 2
+    sleep 5 
 done
