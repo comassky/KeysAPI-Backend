@@ -104,7 +104,6 @@ while true; do
     
     if [ "$TOR_STATUS" -ne 0 ]; then
         echo "❌ Erreur CURL/Tor lors de l'appel BATCH. Code: $TOR_STATUS. Pause longue et réessai..."
-        # Si la connexion Tor/CURL échoue, on attend plus longtemps.
         sleep 30
         INDEX=$((INDEX + 1))
         continue
@@ -116,7 +115,6 @@ while true; do
         echo "   🚨 ALERTE BLOCAGE : Réponse non-JSON reçue (Rate Limit probable)."
         echo "   (Augmenter le 'sleep' ou redémarrer le service Tor.)"
         echo "========================================================================="
-        # Pause longue et passage à l'index suivant pour tenter une nouvelle IP Tor
         sleep 30
         INDEX=$((INDEX + 1))
         continue
@@ -134,8 +132,9 @@ while true; do
         N_TX=$(echo "$BALANCE_RESPONSE" | jq -r ".\"$BTCOUT\".n_tx // empty") 
         
         # --- DÉBUT DE LA LOGIQUE COULEUR ET STATUT ---
-        COLOR_CODE="\e[31m"       # Couleur par défaut (Rouge)
-        STATUS_MESSAGE="❌ 0.00000000 BTC (0 tx) | Jamais utilisé"
+        COLOR_CODE="\e[31m"       # Code couleur Rouge
+        STATUS_SYMBOL="❌"
+        STATUS_MESSAGE="0.00000000 BTC (0 tx) | Jamais utilisé"
         LOG_SUCCESS=false
 
         if [ -n "$FINAL_BALANCE" ] && [ "$FINAL_BALANCE" != "null" ]; then
@@ -148,22 +147,25 @@ while true; do
                 
                 # 🏆 CAS 1 : SOLDE TROUVÉ (Couleur VERTE)
                 COLOR_CODE="\e[32m" # Vert
-                STATUS_MESSAGE="🎉 ${BALANCE_BTC} BTC (${N_TX} tx) ! LOGGED"
+                STATUS_SYMBOL="🎉"
+                STATUS_MESSAGE="${BALANCE_BTC} BTC (${N_TX} tx) ! LOGGED"
                 LOG_SUCCESS=true
                 
             elif [ "$N_TX" -gt 0 ]; then
                 
                 # ⚠️ CAS 2 : TRANSACTIONS MAIS SOLDE NUL (Couleur JAUNE)
                 COLOR_CODE="\e[33m" # Jaune
-                STATUS_MESSAGE="🟡 0.00000000 BTC (${N_TX} tx) | Transactions antérieures"
+                STATUS_SYMBOL="🟡"
+                STATUS_MESSAGE="0.00000000 BTC (${N_TX} tx) | Transactions antérieures"
                 
             # Si le solde est 0 et N_TX est 0, il reste en ROUGE (couleur par défaut)
             fi
         fi
         # --- FIN DE LA LOGIQUE COULEUR ET STATUT ---
         
-        # 💡 FORMATAGE FINAL : Applique la couleur à toute la ligne (WIF, Adresse et Solde)
-        printf "${COLOR_CODE}WIF: %-52s | Adresse: %-34s | Solde: %s\e[0m\n" "$WIF" "$BTCOUT" "$STATUS_MESSAGE"
+        # 💡 FORMATAGE FINAL : La couleur est appliquée uniquement au symbole et au message de statut
+        printf "WIF: %-52s | Adresse: %-34s | Solde: ${COLOR_CODE}%s %s\e[0m\n" \
+               "$WIF" "$BTCOUT" "$STATUS_SYMBOL" "$STATUS_MESSAGE"
 
         # Traitement du succès (uniquement si BTC > 0)
         if [ "$LOG_SUCCESS" = true ]; then
