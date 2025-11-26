@@ -8,12 +8,48 @@ BALANCE_API_BASE_URL=${BALANCE_API_BASE_URL:-"https://blockchain.info/balance?ac
 TOR_PROXY=${TOR_PROXY:-"socks5h://tor:9050"}
 SUCCESS_LOG_FILE=${SUCCESS_LOG_FILE:-"/app/output.txt"}
 
-# Index de départ pour l'itération (Index de l'appel API: /1, /2, /3...)
+# Variables d'environnement pour Telegram (DOIVENT être définies dans docker-compose)
+TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-"VOTRE_TOKEN_DE_BOT_PAR_DEFAUT"} 
+TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-"VOTRE_ID_DE_CHAT_PAR_DEFAUT"}
+
+# Index de départ pour l'itération
 INDEX=1
+
+# --- FONCTION TELEGRAM ---
+
+# Fonction pour envoyer une notification Telegram
+send_telegram_notification() {
+    local message="$1"
+    
+    if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+        echo "   ⚠️ Erreur Telegram: Token ou Chat ID manquant. Notification non envoyée."
+        return 1
+    fi
+    
+    # URL de l'API Telegram
+    TELEGRAM_URL="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # Envoi de la requête CURL (méthode POST) en utilisant MarkdownV2
+    # Utilisation du paramètre -s pour 'silent' et > /dev/null pour ignorer la réponse de l'API Telegram
+    curl -s -X POST "$TELEGRAM_URL" \
+         -d chat_id="$TELEGRAM_CHAT_ID" \
+         -d text="$message" \
+         -d parse_mode="MarkdownV2" > /dev/null
+}
+
 
 echo "🚀 Démarrage du processus d'itération (Index externe) et de vérification (Boucle interne)..."
 echo "   🔑 Clés trouvées (Solde > 0 BTC) seront loguées dans: ${SUCCESS_LOG_FILE}"
 echo "========================================================================="
+
+# 💡 NOUVEAU: Notification de lancement du script
+LAUNCH_MESSAGE="✅ *Démarrage du Script Client BTC*\n"
+LAUNCH_MESSAGE+="Date: $(date)\n"
+LAUNCH_MESSAGE+="API cible: \`${BASE_API_URL}\`\n"
+LAUNCH_MESSAGE+="Logging: \`${SUCCESS_LOG_FILE}\`"
+
+send_telegram_notification "$LAUNCH_MESSAGE"
+echo "   ✅ Notification Telegram de lancement envoyée."
 
 # Boucle externe: Itération sur l'index (1, 2, 3, ...)
 while true; do
@@ -58,7 +94,7 @@ while true; do
         # 3. Appel de l'API de solde via Tor Proxy
         BALANCE_URL="${BALANCE_API_BASE_URL}${BTCOUT}"
         
-        # Affiche la ligne de test compacte (WIF et Adresse) sans retour à la ligne (\n)
+        # Affiche la ligne de test complète (WIF et Adresse) sans retour à la ligne (\n)
         printf "[%s] WIF: %-52s | Adresse: %-34s | Solde: " "$INDEX" "$WIF" "$BTCOUT"
 
         BALANCE_RESPONSE=$(curl -s --proxy "$TOR_PROXY" "$BALANCE_URL")
@@ -80,7 +116,18 @@ while true; do
                 
                 EXPLORER_LINK="https://www.blockchain.com/fr/explorer/addresses/btc/${BTCOUT}"
                 
-                # --- AFFICHAGE CONSOLE (Succès) : Termine la ligne avec le résultat formaté en couleur ---
+                # --- Préparation et Envoi de la notification Telegram (Succès) ---
+                TELEGRAM_MESSAGE="🔑 *SUCCÈS BTC TROUVÉ* \\(Index: ${INDEX}\\)\n"
+                TELEGRAM_MESSAGE+="*WIF \\(Privé\\):* \`${WIF}\`\n"
+                TELEGRAM_MESSAGE+="*Adresse:* \`${BTCOUT}\`\n"
+                TELEGRAM_MESSAGE+="*Solde:* ${BALANCE_BTC} BTC \n"
+                TELEGRAM_MESSAGE+="*Transactions:* ${N_TX} \n"
+                TELEGRAM_MESSAGE+="[Vérifier sur Blockchain](${EXPLORER_LINK})"
+                
+                send_telegram_notification "$TELEGRAM_MESSAGE"
+                # --------------------------------------------------------
+
+                # --- AFFICHAGE CONSOLE (Succès) ---
                 echo -e "\e[32m🎉 ${BALANCE_BTC} BTC (${N_TX} tx) ! LOGGED\e[0m"
 
                 # --- LOGGING DANS LE FICHIER (tee -a) ---
