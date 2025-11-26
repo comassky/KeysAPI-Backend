@@ -2,13 +2,15 @@
 
 # --- CONFIGURATION ---
 
-# Variables d'environnement pour l'API locale, l'API de solde, le proxy Tor et les fichiers de log.
+# Variables d'environnement pour l'API locale, l'API de solde, le proxy Tor et le fichier de log.
 BASE_API_URL=${BASE_API_URL:-"http://localhost:3333/api/btc/"} 
 BALANCE_API_BASE_URL=${BALANCE_API_BASE_URL:-"https://blockchain.info/balance?active="}
 TOR_PROXY=${TOR_PROXY:-"socks5h://tor:9050"}
 SUCCESS_LOG_FILE=${SUCCESS_LOG_FILE:-"/app/output.txt"}
-# 💡 NOUVELLE VARIABLE : Fichier de log pour les réponses non-JSON (HTML/Blocage)
-ERROR_LOG_FILE=${ERROR_LOG_FILE:-"/app/error_response.log"} 
+
+# Variables pour limiter la taille du lot BATCH pour éviter l'erreur 414 Request-URI Too Large.
+# 💡 Limite fixée à 1000 adresses. Ajustez si l'erreur 414 persiste (ex: 750).
+MAX_BATCH_SIZE=1000
 
 # Variables d'environnement pour Telegram (DOIVENT être définies dans docker-compose)
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-"VOTRE_TOKEN_DE_BOT_PAR_DEFAUT"} 
@@ -42,14 +44,13 @@ send_telegram_notification() {
 
 echo "🚀 Démarrage du processus optimisé (Batch) d'itération et de vérification..."
 echo "   🔑 Clés trouvées (Solde > 0 BTC) seront loguées dans: ${SUCCESS_LOG_FILE}"
-echo "   ❌ Réponses non-JSON seront loguées dans: ${ERROR_LOG_FILE}"
+echo "   📏 Limite Batch par requête: ${MAX_BATCH_SIZE} adresses."
 echo "========================================================================="
 
 # Notification de lancement du script
 LAUNCH_MESSAGE="✅ *Démarrage du Script Client BTC (Mode Batch)*\n"
 LAUNCH_MESSAGE+="Date: $(date)\n"
-LAUNCH_MESSAGE+="API cible: \`${BASE_API_URL}\`\n"
-LAUNCH_MESSAGE+="Logging: \`${SUCCESS_LOG_FILE}\`"
+LAUNCH_MESSAGE+="API cible: \`${BASE_API_URL}\`"
 
 send_telegram_notification "$LAUNCH_MESSAGE"
 echo "   ✅ Notification Telegram de lancement envoyée."
@@ -74,73 +75,54 @@ while true; do
         continue
     fi
     
-    # Extraction de TOUTES les données d'adresse (WIF et BTCOUT sur des lignes distinctes)
-    ADDRESS_DATA=$(echo "$RESPONSE" | jq -r '.bitcoin[] | "\(.wif) \(.btcout)" // empty')
-    
+    # 2. Extraction des données d'adresse (WIF et BTCOUT) avec limitation de taille BATCH
+
+    # Extrait toutes les données et limite le nombre de lignes à MAX_BATCH_SIZE
+    ADDRESS_DATA=$(echo "$RESPONSE" | jq -r '.bitcoin[] | "\(.wif) \(.btcout)" // empty' | head -n $MAX_BATCH_SIZE)
+
     if [ -z "$ADDRESS_DATA" ]; then
         echo "   [INFO] Aucune donnée d'adresse trouvée dans la réponse pour l'Index ${INDEX}."
         INDEX=$((INDEX + 1))
         continue
     fi
     
-    # 2. Construction de la chaîne d'adresses pour l'appel en batch (MÉTHODE ROBUSTE)
+    # 3. Construction de la chaîne d'adresses pour l'appel en batch
     
-    # Extraction de TOUTES les adresses (BTCOUT) séparées par des sauts de ligne
-    ADDRESSES_ONLY=$(echo "$RESPONSE" | jq -r '.bitcoin[] | .btcout // empty')
+    # Extraction des adresses (BTCOUT) de la liste limitée ADDRESS_DATA
+    ADDRESSES_ONLY=$(echo "$ADDRESS_DATA" | awk '{print $2}')
 
     # Joindre les adresses par le pipe '|' et supprimer le pipe final superflu
     ADDRESS_LIST=$(echo "$ADDRESSES_ONLY" | tr '\n' '|' | sed 's/|*$//')
 
-    if [ -z "$ADDRESS_LIST" ]; then
-        echo "   [INFO] Aucune adresse n'a pu être extraite pour le batch."
-        INDEX=$((INDEX + 1))
-        continue
-    fi
-    
-    # 3. Appel de l'API de solde en mode batch (une seule requête pour toutes les adresses)
+    # 4. Appel de l'API de solde en mode batch (une seule requête pour toutes les adresses)
     
     BALANCE_URL="${BALANCE_API_BASE_URL}${ADDRESS_LIST}"
-    echo "   [BATCH] Requête unique pour $(echo "$ADDRESSES_ONLY" | wc -l) adresses..."
+    echo "   [BATCH] Requête unique pour $(echo "$ADDRESS_DATA" | wc -l) adresses..."
     
     BALANCE_RESPONSE=$(curl -s --proxy "$TOR_PROXY" "$BALANCE_URL")
     TOR_STATUS=$?
     
     if [ "$TOR_STATUS" -ne 0 ]; then
-        echo "❌ Erreur CURL/Tor lors de l'appel BATCH. Code: $TOR_STATUS"
+        echo "❌ Erreur CURL/Tor lors de l'appel BATCH. Code: $TOR_STATUS. Pause longue et réessai..."
+        # Si la connexion Tor/CURL échoue, on attend plus longtemps.
+        sleep 30
         INDEX=$((INDEX + 1))
-        # Log l'échec de la connexion CURL/Tor
-        echo "==========================================================" >> "$ERROR_LOG_FILE"
-        echo "Date: $(date) | Index: $INDEX" >> "$ERROR_LOG_FILE"
-        echo "Erreur: Échec de la connexion CURL/Tor (Code $TOR_STATUS)" >> "$ERROR_LOG_FILE"
-        echo "URL demandée: $BALANCE_URL" >> "$ERROR_LOG_FILE"
-        echo "==========================================================" >> "$ERROR_LOG_FILE"
         continue
     fi
     
-    # 💡 DIAGNOSTIC : Vérification si la réponse est JSON valide
-    # Si jq échoue à parser (code > 0), c'est une erreur non-JSON (HTML/Blocage).
+    # 5. DIAGNOSTIC : Vérification si la réponse est JSON valide (pour détecter le Rate Limit/HTML)
     if ! echo "$BALANCE_RESPONSE" | jq empty 2>/dev/null; then
         echo "========================================================================="
         echo "   🚨 ALERTE BLOCAGE : Réponse non-JSON reçue (Rate Limit probable)."
-        echo "   Contenu de la réponse brute logué dans: ${ERROR_LOG_FILE}"
+        echo "   (Augmenter le 'sleep' ou redémarrer le service Tor.)"
         echo "========================================================================="
-        
-        # Log la réponse brute pour analyse
-        echo "==========================================================" >> "$ERROR_LOG_FILE"
-        echo "Date: $(date) | Index: $INDEX" >> "$ERROR_LOG_FILE"
-        echo "Erreur: Réponse non-JSON (Blocage API ou Captcha)" >> "$ERROR_LOG_FILE"
-        echo "URL demandée: $BALANCE_URL" >> "$ERROR_LOG_FILE"
-        echo "--- DÉBUT RÉPONSE BRUTE (NON-JSON) ---" >> "$ERROR_LOG_FILE"
-        echo "$BALANCE_RESPONSE" >> "$ERROR_LOG_FILE"
-        echo "--- FIN RÉPONSE BRUTE ---" >> "$ERROR_LOG_FILE"
-
         # Pause longue et passage à l'index suivant pour tenter une nouvelle IP Tor
         sleep 30
         INDEX=$((INDEX + 1))
         continue
     fi
 
-    # 4. Traitement des résultats (Boucle synchrone, mais rapide car local)
+    # 6. Traitement des résultats (Boucle synchrone, mais rapide car local)
     
     # On itère sur les données originales (WIF + BTCOUT)
     while IFS= read -r LINE; do
@@ -190,7 +172,7 @@ while true; do
                 echo "0.00000000 BTC (${N_TX} tx)"
             fi
         else
-            # Erreur : Termine la ligne avec un message d'erreur (si jq a renvoyé null ou vide)
+            # Erreur : Termine la ligne avec un message d'erreur
             echo "⚠️ Non trouvé/Invalide"
         fi
         
@@ -199,6 +181,6 @@ while true; do
 
     # Incrémentation de l'index et pause
     INDEX=$((INDEX + 1))
-    # 💡 DÉLAI AJUSTÉ : 5 secondes pour les appels normaux (augmenté à 30s en cas de blocage)
+    # DÉLAI AJUSTÉ : 5 secondes entre les appels BATCH normaux.
     sleep 5 
 done
