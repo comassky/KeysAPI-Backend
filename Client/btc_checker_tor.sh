@@ -10,7 +10,7 @@ SUCCESS_LOG_FILE=${SUCCESS_LOG_FILE:-"/app/output.txt"}
 
 # Variables pour limiter la taille du lot BATCH pour éviter l'erreur 414 Request-URI Too Large.
 # 💡 Limite fixée à 1000 adresses. Ajustez si l'erreur 414 persiste (ex: 750).
-MAX_BATCH_SIZE=1000
+MAX_BATCH_SIZE=400
 
 # Variables d'environnement pour Telegram (DOIVENT être définies dans docker-compose)
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-"VOTRE_TOKEN_DE_BOT_PAR_DEFAUT"} 
@@ -182,5 +182,5 @@ while true; do
     # Incrémentation de l'index et pause
     INDEX=$((INDEX + 1))
     # DÉLAI AJUSTÉ : 5 secondes entre les appels BATCH normaux.
-    sleep 5 
+    sleep 2
 done
