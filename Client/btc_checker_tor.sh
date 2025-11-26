@@ -30,26 +30,27 @@ send_telegram_notification() {
     TELEGRAM_URL="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
     
     # Envoi de la requête CURL (méthode POST) en utilisant MarkdownV2
-    # Utilisation du paramètre -s pour 'silent' et > /dev/null pour ignorer la réponse de l'API Telegram
     curl -s -X POST "$TELEGRAM_URL" \
          -d chat_id="$TELEGRAM_CHAT_ID" \
          -d text="$message" \
          -d parse_mode="MarkdownV2" > /dev/null
 }
 
+# --- DÉMARRAGE DU SCRIPT ---
 
-echo "🚀 Démarrage du processus d'itération (Index externe) et de vérification (Boucle interne)..."
+echo "🚀 Démarrage du processus optimisé (Batch) d'itération et de vérification..."
 echo "   🔑 Clés trouvées (Solde > 0 BTC) seront loguées dans: ${SUCCESS_LOG_FILE}"
 echo "========================================================================="
 
-# 💡 NOUVEAU: Notification de lancement du script
-LAUNCH_MESSAGE="✅ *Démarrage du Script Client BTC*\n"
+# Notification de lancement du script
+LAUNCH_MESSAGE="✅ *Démarrage du Script Client BTC (Mode Batch)*\n"
 LAUNCH_MESSAGE+="Date: $(date)\n"
 LAUNCH_MESSAGE+="API cible: \`${BASE_API_URL}\`\n"
 LAUNCH_MESSAGE+="Logging: \`${SUCCESS_LOG_FILE}\`"
 
 send_telegram_notification "$LAUNCH_MESSAGE"
 echo "   ✅ Notification Telegram de lancement envoyée."
+
 
 # Boucle externe: Itération sur l'index (1, 2, 3, ...)
 while true; do
@@ -59,7 +60,7 @@ while true; do
     # Log de l'appel de l'index
     echo "[TEST] Index externe: ${INDEX} | Appel API: ${API_URL}"
 
-    # 1. Appel de l'API locale
+    # 1. Appel de l'API locale pour obtenir les WIF/BTCOUT
     RESPONSE=$(curl -s -m 10 "$API_URL")
     CURL_STATUS=$?
 
@@ -70,44 +71,56 @@ while true; do
         continue
     fi
     
-    # 2. Extraction de TOUS les objets {wif, btcout, ...} du tableau 'bitcoin' sur des lignes distinctes
-    ADDRESS_DETAILS=$(echo "$RESPONSE" | jq -c '.bitcoin[] // empty')
+    # Extraction de TOUTES les données d'adresse
+    ADDRESS_DATA=$(echo "$RESPONSE" | jq -r '.bitcoin[] | "\(.wif) \(.btcout)" // empty')
     
-    if [ -z "$ADDRESS_DETAILS" ]; then
-        echo "   [INFO] Aucune donnée d'adresse trouvée dans la réponse pour l'Index ${INDEX}. Vérifiez le format JSON."
+    if [ -z "$ADDRESS_DATA" ]; then
+        echo "   [INFO] Aucune donnée d'adresse trouvée dans la réponse pour l'Index ${INDEX}."
         INDEX=$((INDEX + 1))
         continue
     fi
     
-    # Boucle interne: Traitement de chaque adresse reçue pour cet index
-    while IFS= read -r DETAIL_JSON; do
-        
-        # Extraction des champs WIF et BTCOUT pour l'adresse courante
-        WIF=$(echo "$DETAIL_JSON" | jq -r '.wif // empty')
-        BTCOUT=$(echo "$DETAIL_JSON" | jq -r '.btcout // empty')
-
-        if [ -z "$WIF" ] || [ -z "$BTCOUT" ] || [ "$WIF" == "null" ] || [ "$BTCOUT" == "null" ]; then
-            echo "   [INFO] Ligne invalide: WIF ou BTCOUT manquant. Saut."
-            continue 
+    # 2. Construction de la chaîne d'adresses pour l'appel en batch
+    # On itère sur ADDRESS_DATA pour collecter uniquement les adresses (BTCOUT)
+    ADDRESS_LIST=""
+    while IFS= read -r LINE; do
+        BTCOUT=$(echo "$LINE" | awk '{print $2}')
+        if [ -n "$ADDRESS_LIST" ]; then
+            ADDRESS_LIST="${ADDRESS_LIST}|${BTCOUT}"
+        else
+            ADDRESS_LIST="${BTCOUT}"
         fi
-        
-        # 3. Appel de l'API de solde via Tor Proxy
-        BALANCE_URL="${BALANCE_API_BASE_URL}${BTCOUT}"
-        
-        # Affiche la ligne de test complète (WIF et Adresse) sans retour à la ligne (\n)
-        printf "[%s] WIF: %-52s | Adresse: %-34s | Solde: " "$INDEX" "$WIF" "$BTCOUT"
+    done <<< "$ADDRESS_DATA"
 
-        BALANCE_RESPONSE=$(curl -s --proxy "$TOR_PROXY" "$BALANCE_URL")
-        TOR_STATUS=$?
-        
-        if [ "$TOR_STATUS" -ne 0 ]; then
-            echo "❌ Erreur CURL/Tor. Code: $TOR_STATUS"
-            continue
-        fi
 
+    # 3. Appel de l'API de solde en mode batch (une seule requête pour toutes les adresses)
+    
+    BALANCE_URL="${BALANCE_API_BASE_URL}${ADDRESS_LIST}"
+    echo "   [BATCH] Requête unique pour $(echo "$ADDRESS_DATA" | wc -l) adresses..."
+    
+    BALANCE_RESPONSE=$(curl -s --proxy "$TOR_PROXY" "$BALANCE_URL")
+    TOR_STATUS=$?
+    
+    if [ "$TOR_STATUS" -ne 0 ]; then
+        echo "❌ Erreur CURL/Tor lors de l'appel BATCH. Code: $TOR_STATUS"
+        INDEX=$((INDEX + 1))
+        continue
+    fi
+
+    # 4. Traitement des résultats (Boucle synchrone, mais rapide car local)
+    
+    # On itère sur les données originales (WIF + BTCOUT)
+    while IFS= read -r LINE; do
+        WIF=$(echo "$LINE" | awk '{print $1}')
+        BTCOUT=$(echo "$LINE" | awk '{print $2}')
+
+        # Extraction des données de solde spécifiques à cette adresse du grand JSON
         FINAL_BALANCE=$(echo "$BALANCE_RESPONSE" | jq -r ".\"$BTCOUT\".final_balance // empty")
         N_TX=$(echo "$BALANCE_RESPONSE" | jq -r ".\"$BTCOUT\".n_tx // empty") 
         
+        # Affiche la ligne de test complète (WIF et Adresse)
+        printf "[%s] WIF: %-52s | Adresse: %-34s | Solde: " "$INDEX" "$WIF" "$BTCOUT"
+
         if [ -n "$FINAL_BALANCE" ] && [ "$FINAL_BALANCE" != "null" ]; then
             BALANCE_BTC=$(echo "scale=8; $FINAL_BALANCE / 100000000" | bc 2>/dev/null)
             
@@ -148,9 +161,9 @@ while true; do
             echo "⚠️ Non trouvé/Invalide"
         fi
         
-    done <<< "$ADDRESS_DETAILS"
+    done <<< "$ADDRESS_DATA"
+
 
     # Incrémentation de l'index et pause
     INDEX=$((INDEX + 1))
-    sleep 0.5 
 done
