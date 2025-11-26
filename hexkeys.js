@@ -1,6 +1,6 @@
 import BigNumber from "bignumber.js";
 
-const seedsPerPage = 128;
+const seedsPerPage = 1400;
 
 const MAX_ADDRESSES = new BigNumber(
   "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
