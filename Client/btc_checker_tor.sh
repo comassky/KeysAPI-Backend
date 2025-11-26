@@ -9,7 +9,6 @@ TOR_PROXY=${TOR_PROXY:-"socks5h://tor:9050"}
 SUCCESS_LOG_FILE=${SUCCESS_LOG_FILE:-"/app/output.txt"}
 
 # Variables pour limiter la taille du lot BATCH pour éviter l'erreur 414 Request-URI Too Large.
-# Limite fixée à 450 adresses, basée sur les tests utilisateur.
 MAX_BATCH_SIZE=450
 
 # Variables d'environnement pour Telegram (DOIVENT être définies dans docker-compose)
@@ -30,10 +29,8 @@ send_telegram_notification() {
         return 1
     fi
     
-    # URL de l'API Telegram
     TELEGRAM_URL="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
     
-    # Envoi de la requête CURL (méthode POST) en utilisant MarkdownV2
     curl -s -X POST "$TELEGRAM_URL" \
          -d chat_id="$TELEGRAM_CHAT_ID" \
          -d text="$message" \
@@ -47,11 +44,7 @@ echo "   🔑 Clés trouvées (Solde > 0 BTC) seront loguées dans: ${SUCCESS_LO
 echo "   📏 Limite Batch par requête: ${MAX_BATCH_SIZE} adresses."
 echo "========================================================================="
 
-# Notification de lancement du script
-LAUNCH_MESSAGE="✅ *Démarrage du Script Client BTC (Mode Batch)*\n"
-LAUNCH_MESSAGE+="Date: $(date)\n"
-LAUNCH_MESSAGE+="API cible: \`${BASE_API_URL}\`"
-
+LAUNCH_MESSAGE="✅ *Démarrage du Script Client BTC (Mode Batch)*\nDate: $(date)\nAPI cible: \`${BASE_API_URL}\`"
 send_telegram_notification "$LAUNCH_MESSAGE"
 echo "   ✅ Notification Telegram de lancement envoyée."
 
@@ -60,11 +53,9 @@ echo "   ✅ Notification Telegram de lancement envoyée."
 while true; do
     
     API_URL="${BASE_API_URL}${INDEX}"
-    
-    # Log de l'appel de l'index
     echo "[TEST] Index externe: ${INDEX} | Appel API: ${API_URL}"
 
-    # 1. Appel de l'API locale pour obtenir les WIF/BTCOUT
+    # 1. Appel de l'API locale
     RESPONSE=$(curl -s -m 10 "$API_URL")
     CURL_STATUS=$?
 
@@ -76,9 +67,8 @@ while true; do
     fi
     
     # 2. Extraction des données d'adresse (WIF et BTCOUT) avec limitation de taille BATCH
-
-    # Extrait toutes les données et limite le nombre de lignes à MAX_BATCH_SIZE
-    ADDRESS_DATA=$(echo "$RESPONSE" | jq -r '.bitcoin[] | "\(.wif) \(.btcout)" // empty' | head -n $MAX_BATCH_SIZE)
+    # Extraction et formatage: WIF<espace>BTCOUT sur chaque ligne
+    ADDRESS_DATA=$(echo "$RESPONSE" | jq -r '.bitcoin[] | "\(.wif) \(.btcout)" // empty' | head -n "$MAX_BATCH_SIZE")
 
     if [ -z "$ADDRESS_DATA" ]; then
         echo "   [INFO] Aucune donnée d'adresse trouvée dans la réponse pour l'Index ${INDEX}."
@@ -86,16 +76,11 @@ while true; do
         continue
     fi
     
-    # 3. Construction de la chaîne d'adresses pour l'appel en batch
-    
-    # Extraction des adresses (BTCOUT) de la liste limitée ADDRESS_DATA
-    ADDRESSES_ONLY=$(echo "$ADDRESS_DATA" | awk '{print $2}')
+    # 3. Construction de la chaîne d'adresses pour l'appel en batch (OPTIMISÉ)
+    # Extrait toutes les adresses de ADDRESS_DATA (2ème colonne) et les joint par '|'
+    ADDRESS_LIST=$(echo "$ADDRESS_DATA" | awk '{print $2}' | paste -s -d '|' -)
 
-    # Joindre les adresses par le pipe '|' et supprimer le pipe final superflu
-    ADDRESS_LIST=$(echo "$ADDRESSES_ONLY" | tr '\n' '|' | sed 's/|*$//')
-
-    # 4. Appel de l'API de solde en mode batch (une seule requête pour toutes les adresses)
-    
+    # 4. Appel de l'API de solde en mode batch
     BALANCE_URL="${BALANCE_API_BASE_URL}${ADDRESS_LIST}"
     echo "   [BATCH] Requête unique pour $(echo "$ADDRESS_DATA" | wc -l) adresses..."
     
@@ -109,61 +94,58 @@ while true; do
         continue
     fi
     
-    # 5. DIAGNOSTIC : Vérification si la réponse est JSON valide (pour détecter le Rate Limit/HTML)
+    # 5. DIAGNOSTIC JSON
     if ! echo "$BALANCE_RESPONSE" | jq empty 2>/dev/null; then
         echo "========================================================================="
         echo "   🚨 ALERTE BLOCAGE : Réponse non-JSON reçue (Rate Limit probable)."
-        echo "   (Augmenter le 'sleep' ou redémarrer le service Tor.)"
         echo "========================================================================="
         sleep 30
         INDEX=$((INDEX + 1))
         continue
     fi
 
-    # 6. Traitement des résultats (Boucle synchrone, mais rapide car local)
+    # 6. Traitement des résultats (OPTIMISÉ)
     
-    # On itère sur les données originales (WIF + BTCOUT)
     while IFS= read -r LINE; do
-        WIF=$(echo "$LINE" | awk '{print $1}')
-        BTCOUT=$(echo "$LINE" | awk '{print $2}')
+        # Utilisation de Bash Read pour séparer le WIF et le BTCOUT de la ligne actuelle
+        read -r WIF BTCOUT <<< "$LINE"
 
-        # Extraction des données de solde spécifiques à cette adresse du grand JSON
-        FINAL_BALANCE=$(echo "$BALANCE_RESPONSE" | jq -r ".\"$BTCOUT\".final_balance // empty")
-        N_TX=$(echo "$BALANCE_RESPONSE" | jq -r ".\"$BTCOUT\".n_tx // empty") 
+        # Extraction des données de solde spécifiques (Sécurisé par // 0)
+        FINAL_BALANCE=$(echo "$BALANCE_RESPONSE" | jq -r ".\"$BTCOUT\".final_balance // 0")
+        N_TX=$(echo "$BALANCE_RESPONSE" | jq -r ".\"$BTCOUT\".n_tx // 0") 
         
-        # --- DÉBUT DE LA LOGIQUE COULEUR ET STATUT ---
-        COLOR_CODE="\e[31m"       # Code couleur Rouge
+        # --- LOGIQUE COULEUR ET STATUT ---
+        COLOR_CODE="\e[31m"       # Rouge (Défaut : Inactif)
         STATUS_SYMBOL="❌"
-        STATUS_MESSAGE="0.00000000 BTC (0 tx) | Jamais utilisé"
         LOG_SUCCESS=false
 
-        if [ -n "$FINAL_BALANCE" ] && [ "$FINAL_BALANCE" != "null" ]; then
+        if [ "$FINAL_BALANCE" -gt 0 ]; then
             
-            # Conversion en BTC pour les tests de solde
-            BALANCE_BTC=$(echo "scale=8; $FINAL_BALANCE / 100000000" | bc 2>/dev/null)
+            # 🏆 CAS 1 : SOLDE TROUVÉ (Vert)
+            COLOR_CODE="\e[32m" # Vert
+            STATUS_SYMBOL="🎉"
+            LOG_SUCCESS=true
             
-            # Vérifie si le solde est strictement supérieur à 0
-            if (( $(echo "$BALANCE_BTC > 0" | bc -l) )); then
-                
-                # 🏆 CAS 1 : SOLDE TROUVÉ (Couleur VERTE)
-                COLOR_CODE="\e[32m" # Vert
-                STATUS_SYMBOL="🎉"
-                STATUS_MESSAGE="${BALANCE_BTC} BTC (${N_TX} tx) ! LOGGED"
-                LOG_SUCCESS=true
-                
-            elif [ "$N_TX" -gt 0 ]; then
-                
-                # ⚠️ CAS 2 : TRANSACTIONS MAIS SOLDE NUL (Couleur JAUNE)
-                COLOR_CODE="\e[33m" # Jaune
-                STATUS_SYMBOL="🟡"
-                STATUS_MESSAGE="0.00000000 BTC (${N_TX} tx) | Transactions antérieures"
-                
-            # Si le solde est 0 et N_TX est 0, il reste en ROUGE (couleur par défaut)
-            fi
-        fi
-        # --- FIN DE LA LOGIQUE COULEUR ET STATUT ---
+        elif [ "$N_TX" -gt 0 ]; then
+            
+            # ⚠️ CAS 2 : TRANSACTIONS MAIS SOLDE NUL (Jaune)
+            COLOR_CODE="\e[33m" # Jaune
+            STATUS_SYMBOL="🟡"
         
-        # 💡 FORMATAGE FINAL : La couleur est appliquée uniquement au symbole et au message de statut
+        # Sinon, reste en ROUGE (Inactif/Jamais utilisé)
+        fi
+        
+        # Convertir FINAL_BALANCE en BTC (une seule fois pour l'affichage)
+        if [ "$FINAL_BALANCE" -gt 0 ]; then
+            BALANCE_BTC=$(echo "scale=8; $FINAL_BALANCE / 100000000" | bc 2>/dev/null)
+            STATUS_MESSAGE="${BALANCE_BTC} BTC (${N_TX} tx) $([ "$LOG_SUCCESS" = true ] && echo "! LOGGED")"
+        else
+            BALANCE_BTC="0.00000000" # Pour le logging futur
+            STATUS_MESSAGE="${BALANCE_BTC} BTC (${N_TX} tx)"
+        fi
+
+        
+        # FORMATAGE FINAL : Applique la couleur uniquement au symbole et au message de statut
         printf "WIF: %-52s | Adresse: %-34s | Solde: ${COLOR_CODE}%s %s\e[0m\n" \
                "$WIF" "$BTCOUT" "$STATUS_SYMBOL" "$STATUS_MESSAGE"
 
@@ -173,13 +155,7 @@ while true; do
             EXPLORER_LINK="https://www.blockchain.com/fr/explorer/addresses/btc/${BTCOUT}"
 
             # --- Préparation et Envoi de la notification Telegram (Succès) ---
-            TELEGRAM_MESSAGE="🔑 *SUCCÈS BTC TROUVÉ* \\(Index: ${INDEX}\\)\n"
-            TELEGRAM_MESSAGE+="*WIF \\(Privé\\):* \`${WIF}\`\n"
-            TELEGRAM_MESSAGE+="*Adresse:* \`${BTCOUT}\`\n"
-            TELEGRAM_MESSAGE+="*Solde:* ${BALANCE_BTC} BTC \n"
-            TELEGRAM_MESSAGE+="*Transactions:* ${N_TX} \n"
-            TELEGRAM_MESSAGE+="[Vérifier sur Blockchain](${EXPLORER_LINK})"
-            
+            TELEGRAM_MESSAGE="🔑 *SUCCÈS BTC TROUVÉ* \\(Index: ${INDEX}\\)\n*WIF \\(Privé\\):* \`${WIF}\`\n*Adresse:* \`${BTCOUT}\`\n*Solde:* ${BALANCE_BTC} BTC \n*Transactions:* ${N_TX} \n[Vérifier sur Blockchain](${EXPLORER_LINK})"
             send_telegram_notification "$TELEGRAM_MESSAGE"
             # --------------------------------------------------------
 
@@ -199,6 +175,5 @@ while true; do
 
     # Incrémentation de l'index et pause
     INDEX=$((INDEX + 1))
-    # DÉLAI AJUSTÉ : 5 secondes entre les appels BATCH normaux.
     sleep 5 
 done
