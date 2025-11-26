@@ -1,12 +1,14 @@
 #!/bin/bash
 
-# --- CONFIGURATION (Utilise les variables d'environnement de Docker Compose ou des valeurs par défaut) ---
+# --- CONFIGURATION ---
 
-# Variables d'environnement pour l'API locale, l'API de solde, le proxy Tor et le fichier de log.
+# Variables d'environnement pour l'API locale, l'API de solde, le proxy Tor et les fichiers de log.
 BASE_API_URL=${BASE_API_URL:-"http://localhost:3333/api/btc/"} 
 BALANCE_API_BASE_URL=${BALANCE_API_BASE_URL:-"https://blockchain.info/balance?active="}
 TOR_PROXY=${TOR_PROXY:-"socks5h://tor:9050"}
 SUCCESS_LOG_FILE=${SUCCESS_LOG_FILE:-"/app/output.txt"}
+# 💡 NOUVELLE VARIABLE : Fichier de log pour les réponses non-JSON (HTML/Blocage)
+ERROR_LOG_FILE=${ERROR_LOG_FILE:-"/app/error_response.log"} 
 
 # Variables d'environnement pour Telegram (DOIVENT être définies dans docker-compose)
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-"VOTRE_TOKEN_DE_BOT_PAR_DEFAUT"} 
@@ -40,6 +42,7 @@ send_telegram_notification() {
 
 echo "🚀 Démarrage du processus optimisé (Batch) d'itération et de vérification..."
 echo "   🔑 Clés trouvées (Solde > 0 BTC) seront loguées dans: ${SUCCESS_LOG_FILE}"
+echo "   ❌ Réponses non-JSON seront loguées dans: ${ERROR_LOG_FILE}"
 echo "========================================================================="
 
 # Notification de lancement du script
@@ -85,7 +88,7 @@ while true; do
     # Extraction de TOUTES les adresses (BTCOUT) séparées par des sauts de ligne
     ADDRESSES_ONLY=$(echo "$RESPONSE" | jq -r '.bitcoin[] | .btcout // empty')
 
-    # 💡 CLEF : Joindre les adresses par le pipe '|' et supprimer le pipe final superflu
+    # Joindre les adresses par le pipe '|' et supprimer le pipe final superflu
     ADDRESS_LIST=$(echo "$ADDRESSES_ONLY" | tr '\n' '|' | sed 's/|*$//')
 
     if [ -z "$ADDRESS_LIST" ]; then
@@ -104,6 +107,35 @@ while true; do
     
     if [ "$TOR_STATUS" -ne 0 ]; then
         echo "❌ Erreur CURL/Tor lors de l'appel BATCH. Code: $TOR_STATUS"
+        INDEX=$((INDEX + 1))
+        # Log l'échec de la connexion CURL/Tor
+        echo "==========================================================" >> "$ERROR_LOG_FILE"
+        echo "Date: $(date) | Index: $INDEX" >> "$ERROR_LOG_FILE"
+        echo "Erreur: Échec de la connexion CURL/Tor (Code $TOR_STATUS)" >> "$ERROR_LOG_FILE"
+        echo "URL demandée: $BALANCE_URL" >> "$ERROR_LOG_FILE"
+        echo "==========================================================" >> "$ERROR_LOG_FILE"
+        continue
+    fi
+    
+    # 💡 DIAGNOSTIC : Vérification si la réponse est JSON valide
+    # Si jq échoue à parser (code > 0), c'est une erreur non-JSON (HTML/Blocage).
+    if ! echo "$BALANCE_RESPONSE" | jq empty 2>/dev/null; then
+        echo "========================================================================="
+        echo "   🚨 ALERTE BLOCAGE : Réponse non-JSON reçue (Rate Limit probable)."
+        echo "   Contenu de la réponse brute logué dans: ${ERROR_LOG_FILE}"
+        echo "========================================================================="
+        
+        # Log la réponse brute pour analyse
+        echo "==========================================================" >> "$ERROR_LOG_FILE"
+        echo "Date: $(date) | Index: $INDEX" >> "$ERROR_LOG_FILE"
+        echo "Erreur: Réponse non-JSON (Blocage API ou Captcha)" >> "$ERROR_LOG_FILE"
+        echo "URL demandée: $BALANCE_URL" >> "$ERROR_LOG_FILE"
+        echo "--- DÉBUT RÉPONSE BRUTE (NON-JSON) ---" >> "$ERROR_LOG_FILE"
+        echo "$BALANCE_RESPONSE" >> "$ERROR_LOG_FILE"
+        echo "--- FIN RÉPONSE BRUTE ---" >> "$ERROR_LOG_FILE"
+
+        # Pause longue et passage à l'index suivant pour tenter une nouvelle IP Tor
+        sleep 30
         INDEX=$((INDEX + 1))
         continue
     fi
@@ -158,7 +190,7 @@ while true; do
                 echo "0.00000000 BTC (${N_TX} tx)"
             fi
         else
-            # Erreur : Termine la ligne avec un message d'erreur
+            # Erreur : Termine la ligne avec un message d'erreur (si jq a renvoyé null ou vide)
             echo "⚠️ Non trouvé/Invalide"
         fi
         
@@ -167,6 +199,6 @@ while true; do
 
     # Incrémentation de l'index et pause
     INDEX=$((INDEX + 1))
-    # 💡 AJOUT DU DÉLAI : Crucial pour éviter le blocage (Rate Limit) de l'API après un appel BATCH.
+    # 💡 DÉLAI AJUSTÉ : 5 secondes pour les appels normaux (augmenté à 30s en cas de blocage)
     sleep 5 
 done
