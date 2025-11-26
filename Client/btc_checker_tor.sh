@@ -71,7 +71,7 @@ while true; do
         continue
     fi
     
-    # Extraction de TOUTES les données d'adresse
+    # Extraction de TOUTES les données d'adresse (WIF et BTCOUT sur des lignes distinctes)
     ADDRESS_DATA=$(echo "$RESPONSE" | jq -r '.bitcoin[] | "\(.wif) \(.btcout)" // empty')
     
     if [ -z "$ADDRESS_DATA" ]; then
@@ -80,23 +80,24 @@ while true; do
         continue
     fi
     
-    # 2. Construction de la chaîne d'adresses pour l'appel en batch
-    # On itère sur ADDRESS_DATA pour collecter uniquement les adresses (BTCOUT)
-    ADDRESS_LIST=""
-    while IFS= read -r LINE; do
-        BTCOUT=$(echo "$LINE" | awk '{print $2}')
-        if [ -n "$ADDRESS_LIST" ]; then
-            ADDRESS_LIST="${ADDRESS_LIST}|${BTCOUT}"
-        else
-            ADDRESS_LIST="${BTCOUT}"
-        fi
-    done <<< "$ADDRESS_DATA"
+    # 2. Construction de la chaîne d'adresses pour l'appel en batch (MÉTHODE ROBUSTE)
+    
+    # Extraction de TOUTES les adresses (BTCOUT) séparées par des sauts de ligne
+    ADDRESSES_ONLY=$(echo "$RESPONSE" | jq -r '.bitcoin[] | .btcout // empty')
 
+    # 💡 CLEF : Joindre les adresses par le pipe '|' et supprimer le pipe final superflu
+    ADDRESS_LIST=$(echo "$ADDRESSES_ONLY" | tr '\n' '|' | sed 's/|*$//')
 
+    if [ -z "$ADDRESS_LIST" ]; then
+        echo "   [INFO] Aucune adresse n'a pu être extraite pour le batch."
+        INDEX=$((INDEX + 1))
+        continue
+    fi
+    
     # 3. Appel de l'API de solde en mode batch (une seule requête pour toutes les adresses)
     
     BALANCE_URL="${BALANCE_API_BASE_URL}${ADDRESS_LIST}"
-    echo "   [BATCH] Requête unique pour $(echo "$ADDRESS_DATA" | wc -l) adresses..."
+    echo "   [BATCH] Requête unique pour $(echo "$ADDRESSES_ONLY" | wc -l) adresses..."
     
     BALANCE_RESPONSE=$(curl -s --proxy "$TOR_PROXY" "$BALANCE_URL")
     TOR_STATUS=$?
@@ -166,4 +167,6 @@ while true; do
 
     # Incrémentation de l'index et pause
     INDEX=$((INDEX + 1))
+    # 💡 AJOUT DU DÉLAI : Crucial pour éviter le blocage (Rate Limit) de l'API après un appel BATCH.
+    sleep 5 
 done
